@@ -1,29 +1,36 @@
 from ast import arg
 from datetime import date
+import errno
 from multiprocessing.connection import wait
 import os
 from pickle import TRUE
 from queue import PriorityQueue
 import random
+import signal
+import sys
 import time
 import requests
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 from web3 import Web3
 import json
 import bs4
+import re
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
-
 
 INFURA_SECRET_KEY = ''  # https://infura.io/
 ETHERSCAN_KEY = '' # https://etherscan.io/myapikey
 TG_BOT_TOKEN = '' # telegram  @BotFather
 TG_USER_ID = ''  # telegram @getmyid_bot
-MY_ADDERESS = '' # your eth address
-MY_PRIVATE_KEY = '' # your private key 
+MY_ADDERESS = '0x123123' # 你的eth地址
+MY_PRIVATE_KEY = '0x123ddd' # eth私钥 
 
-MAX_GAS_FEE = 50
+MAX_GAS_FEE = 50  #最大汽油费
+MAX_MINT_PER_NFT = 5   #每个nft的最大可mint数量，超过就不mint了（不精准，通过单个hash获取，非abi调用）
 
-blacklist = ['Ape','Bear','bear','Duck','duck','Pixel','pixel','Not','Okay','Woman','Baby','baby','Goblin','goblin','Ai']
+FOLLOW_ADDR_LIST = ['0xe749e9E7EAa02203c925A036226AF80e2c79403E','0x4c86f3d2e3d4c0a7cc99a2c45fcaaa1b10d313b6'] #跟单mint地址，找获利高的
+MAX_ETH_FOR_FOLLOW = 0.01  #跟单时能接受的最大mint价格
+
+blacklist = ['Ape','Bear','bear','Duck','duck','Pixel','pixel','Not','Okay','Woman','Baby','baby','Goblin','goblin','Ai','AI'] #黑名单，要求精准 所以区分大小写
 
 headers = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.80 Safari/537.36",
@@ -65,67 +72,70 @@ def get_random_int(min,max):
 def get_gasprice():
     try:
         url = 'https://api.debank.com/chain/gas_price_dict_v2?chain=eth'
-        #{"_seconds":0.0007479190826416016,"data":{"fast":{"estimated_seconds":0,"front_tx_count":0,"price":68000000000.0},"normal":{"estimated_seconds":0,"front_tx_count":0,"price":49000000000.0},"slow":{"estimated_seconds":0,"front_tx_count":0,"price":33000000000.0}},"error_code":0}
         r = requests.get(url, headers=headers,verify=False)
         if r.status_code == 200:
             data = json.loads(r.text)
             fast = int(data['data']['fast']['price']) / 1000000000
             if fast > MAX_GAS_FEE:
-                print_red(f'[get_gasprice] gasprice is too high !! {fast}')
+                print_red(f'[get_gasprice] gasprice too high !!  >{fast}')
                 return 0
             else:
                 return get_random_float(fast - 3, fast + 3)
     except Exception as e:
         print_red(f"[get_gasprice] error: {e}")
         return 0
-    # try:
-    #     url = f'https://api.etherscan.io/api?module=gastracker&action=gasoracle&apikey={ETHERSCAN_KEY}'
-    #     r = requests.get(url,verify=False)
-    #     # {"status":"1","message":"OK","result":{"LastBlock":"14839616","SafeGasPrice":"25","ProposeGasPrice":"25","FastGasPrice":"26","suggestBaseFee":"24.108529894","gasUsedRatio":"0.999680832120495,0.999610718387235,0.999998566659882,0.894152958626572,0.1707775"}}
-    #     if r.status_code == 200 and r.json()['message'] == 'OK':
-    #         SafeGasPrice = float(r.json()['result']['SafeGasPrice'])
-    #         FastGasPrice = float(r.json()['result']['FastGasPrice'])
-    #         if SafeGasPrice > 50:
-    #             print_red(f'[get_gasprice] gasprice is too high !! {SafeGasPrice}')
-    #             return 0
-    #         return get_random_float(SafeGasPrice, FastGasPrice)
-    #     else:
-    #         print_red(f'[get_gasprice] status_code error: {r.status_code} or message error: {r.json()["message"]}')
-    #         return 0
-    # except Exception as e:
-    #     print_red(f"[get_gasprice] error: {e}")
-    #     return 0
 
-
-def is_mint_func(hash):
+def get_info_by_hash(hash):
     try:
         url = f'https://etherscan.io/tx/{hash}'
         r = requests.get(url, headers=headers,verify=False)
-        #<div id="ContentPlaceHolder1_maintable" class="card-body py-4">
         if r.status_code == 200:
             soup = bs4.BeautifulSoup(r.text, 'html.parser')
             text = soup.find('div', id='ContentPlaceHolder1_maintable')
+            mint_count = re.findall(r"Tokens Transferred: \(.*? ERC-", text.text)
+            if mint_count:
+                mint_count = int(re.findall(r"\d+", mint_count[0])[0])
+            else:
+                mint_count = 1
+                # print_red(f"[get_info_by_hash] error: mint_count not found , hash: {hash}")
+                # return {"status":False}
             if 'Mint of' in text.text:
+                function_name = re.findall(r"Function: (.*?)\(", text.text)
+                if function_name:
+                    function_name = function_name[0]
+                    nft_name = soup.find('span', class_='hash-tag text-truncate mr-1').text
+                    return {"status":True, "mint_count":mint_count, "function_name":function_name, "nft_name":nft_name}
+                else:
+                    print_red(f"[get_info_by_hash] error: function_name not found , probably not open source , hash: {hash}")
+                    return {"status":False,'error':'function_name not found'}
+            else:
+                return {"status":False,'error':'not mint','hash':hash}
+        else:
+            print_red(f'[get_info_by_hash] status_code error: {r.status_code}')
+            return {"status":False,'error':'status_code error'}
+    except Exception as e:
+        print_red(f"[get_info_by_hash] error: {e}")
+        return {"status":False,'error':e}
+
+def get_contract_abi(contract_address):
+    try:
+        url = f'https://api.etherscan.io/api?module=contract&action=getabi&address={contract_address}&apikey={ETHERSCAN_KEY}'
+        r = requests.get(url, headers=headers,verify=False)
+        if r.status_code == 200:
+            data = json.loads(r.text)
+            if data['status'] == "1":
                 return True
             else:
                 return False
-            
-            # soup = bs4.BeautifulSoup(r.text, 'lxml')
-            # text = soup.find('textarea', {'id': 'inputdata'}).text
-            # if text.lower().find('mint') > -1:
-            #     return True
-            # else:
-            #     return False
         else:
             return False
     except Exception as e:
-        print_red(f"[is_mint_func] error: {e}")
+        print_red(f"[get_contract_abi] error: {e} ")
         return False
 
 def cancel_mint(w3, chainId):
     print_green('[cancel_mint] start')
     from_address = Web3.toChecksumAddress(MY_ADDERESS)
-    contract_address = Web3.toChecksumAddress(MY_ADDERESS)
     nonce = w3.eth.getTransactionCount(from_address) 
     gas_fee = get_gasprice()
     if gas_fee == 0:
@@ -134,7 +144,7 @@ def cancel_mint(w3, chainId):
     params = {
         'from': from_address,
         'nonce': nonce,
-        'to': contract_address,
+        'to': from_address,
         'value': w3.toWei(0, 'ether'),
         'gas': 21000,
         'maxFeePerGas': w3.toWei(gas_fee, 'gwei'),
@@ -148,171 +158,152 @@ def cancel_mint(w3, chainId):
     except Exception as e:
         return {'status': 'failed', 'error': e, 'task': 'cancel_mint'}
 
-
-
-def mint_by_hash(w3,contract_address,amount,chainId):
+def do_mint(w3, chainId, contract_address,input_data,gas,amount):
+    print_green('[do_mint] start')
+    from_address = Web3.toChecksumAddress(MY_ADDERESS)
+    contract_address = Web3.toChecksumAddress(contract_address)
+    nonce = w3.eth.getTransactionCount(from_address)
+    gas_fee = get_gasprice()
+    if gas_fee == 0:
+        return {'status': 'failed', 'error': 'get gas price error', 'task': 'do_mint'}
+    priorityfee = get_random_float(1,2)
+    gas = get_random_int(gas,gas+50000)
+    print_green(f'[do_mint] gas: {gas}  {gas_fee}  {priorityfee}')
+    params = {
+        'from': from_address,
+        'nonce': nonce,
+        'to': contract_address,
+        'value': w3.toWei(amount, 'ether'),
+        'gas': gas,
+        'maxFeePerGas': w3.toWei(gas_fee, 'gwei'),
+        'maxPriorityFeePerGas': w3.toWei(priorityfee, 'gwei'),
+        'chainId': chainId,
+        'data': input_data,
+    }
     try:
-
-        FIND = 0
-        for page in range(1,6):
-            if FIND == 1:
-                break
-            url = f'https://api.etherscan.io/api?module=account&action=txlist&address={contract_address}&startblock=0&endblock=99999999&page={page}&offset=50&sort=desc&apikey={ETHERSCAN_KEY}'
-            r = requests.get(url,verify=False)
-
-            if r.status_code == 200 and r.json()['message'] == 'OK':
-                result_count = len(r.json()['result'])
-                for i in range(result_count):
-                    last_result = r.json()['result'][i]
-                    isError = last_result['isError']
-                    if isError == "1":
-                        continue
-                    eth_value = last_result['value']
-                    if eth_value != "0":
-                        continue
-                    to_address = last_result['to']
-                    if to_address != contract_address.lower():
-                        continue
-                    from_address = last_result['from'] 
-                    #去除 0x
-                    from_address = from_address[2:]
-                    input_data = last_result['input']
-                    if from_address in input_data:
-                        my_adderss = MY_ADDERESS[2:]
-                        input_data = input_data.replace(from_address, my_adderss)
-                    tmp_input_data = input_data[:-2] 
-                    if '0xa0712d6800000000000000000000000000000000000000000000000000000000000000' == tmp_input_data:
-                        tmp_input_data = input_data[-2:]
-                        tmp_input_data = int(tmp_input_data, 16)
-                        if tmp_input_data > 3:
-                            input_data = '0xa0712d680000000000000000000000000000000000000000000000000000000000000003'
-                    hash = last_result['hash']
-                    if is_mint_func(hash):
-                        FIND = 1
-                        break
-        
-        if FIND == 0:
-            return {'status': 'failed', 'error': 'not find mint_hash', 'task': 'finding mint_hash'}
-        
-        print_blue(f'[input_data] {input_data}')
-
-        from_address = Web3.toChecksumAddress(MY_ADDERESS)
-        contract_address = Web3.toChecksumAddress(contract_address)
-        nonce = w3.eth.getTransactionCount(from_address) 
-        gas_fee = get_gasprice()
-        if gas_fee == 0:
-            return {'status': 'failed', 'error': 'gas price error', 'task': 'get gas price'}
-        priorityfee = get_random_float(1,1.5)
-        print_blue(f'[gas_price] {gas_fee} , {priorityfee}')
-        params = {
-            'from': from_address,
-            'nonce': nonce,
-            'to': contract_address,
-            'value': w3.toWei(amount, 'ether'),
-            'gas': get_random_int(210000, 250000),
-            'maxFeePerGas': w3.toWei(gas_fee, 'gwei'),
-            'maxPriorityFeePerGas': w3.toWei(priorityfee, 'gwei'),
-            'chainId': chainId,
-            'data': input_data,
-        }
-        try:
-            signed_tx = w3.eth.account.signTransaction(params, private_key=MY_PRIVATE_KEY)
-            txn = w3.eth.sendRawTransaction(signed_tx.rawTransaction)
-            return {'status': 'succeed', 'txn_hash': w3.toHex(txn), 'task': 'mint_nft'}
-        except Exception as e:
-            return {'status': 'failed', 'error': e, 'task': 'mint_nft'}
+        signed_tx = w3.eth.account.signTransaction(params, private_key=MY_PRIVATE_KEY)
+        txn = w3.eth.sendRawTransaction(signed_tx.rawTransaction)
+        return {'status': 'succeed', 'txn_hash': w3.toHex(txn), 'task': 'do_mint'}
     except Exception as e:
-        return {'status': 'failed', 'error': e, 'task': 'mint_by_hash'}
+        return {'status': 'failed', 'error': e, 'task': 'do_mint'}
+
+last_token_addr = ''
+def get_free_mint_info():
+    global last_token_addr
+    url = 'https://www.acnft.xyz/api/nft/freeMintAlert?type=0'
+    try:
+        response = requests.get(url,headers=headers, verify=False)
+        if response.status_code == 200:
+            if response.json()['message'] == 'Api请求成功':
+                tokens = response.json()['data']['list'][0]
+                token_address = tokens['token_address']
+                if last_token_addr == '':
+                    last_token_addr = token_address
+                    print_green(f'[get_free_mint_info] init success')
+                    return {'status': 'init', 'task': 'get_free_mint_info'}
+                if token_address == last_token_addr:
+                    return {'status': 'failed', 'error': 'token_address not update', 'task': 'get_free_mint_info'}
+                else:
+                    last_token_addr = token_address
+                    nft_name = tokens['nft_name']
+                    os_link = tokens['os_link']
+                    api = f'https://api.etherscan.io/api?module=account&action=txlist&address={token_address}&startblock=0&endblock=99999999&page=1&offset=50&sort=desc&apikey={ETHERSCAN_KEY}'
+                    r = requests.get(api,verify=False)
+                    if r.status_code == 200 and r.json()['message'] == 'OK':
+                        result_count = len(r.json()['result'])
+                        if result_count < 5:
+                            return {'status': 'failed', 'error': 'mint count less than 5', 'task': 'get_free_mint_info'}
+                        else:
+                            FIND = 0
+                            for i in range(result_count):
+                                last_result = r.json()['result'][i]
+                                isError = last_result['isError']
+                                if int(isError) == 1:
+                                    continue
+                                eth_value = last_result['value']
+                                if int(eth_value) > 0:
+                                    continue
+                                to_address = last_result['to']
+                                if to_address.lower() != token_address.lower():
+                                    continue
+                                from_address = last_result['from'] 
+                                from_address = from_address[2:]
+                                input_data = last_result['input']
+                                if from_address in input_data:
+                                    my_adderss = MY_ADDERESS[2:].lower()
+                                    input_data = input_data.replace(from_address, my_adderss)
+                                hash = last_result['hash']
+                                FIND = 1
+                                break
+                            if FIND == 1:
+                                return {'status': 'succeed', 'type':'free','token_address': token_address, 'nft_name': nft_name, 'os_link': os_link, 'hash': hash, 'input_data': input_data, 'value': '0', 'gas': last_result['gas'], 'task': 'get_free_mint_info'}
+                            else:
+                                return {'status': 'failed', 'error': 'mint not found', 'task': 'get_free_mint_info'}
+                    else:
+                        print_red(f'[get_free_mint_info] get api error, status_code:{r.status_code}')
+                        return {'status': 'failed', 'error': 'get api error', 'task': 'get_free_mint_info'}
+                    
+            else:
+                print_red('[get_free_mint_info] error , message: {}'.format(response.json()['message']))
+                return {'status': 'failed', 'error': 'message: ' + response.json()['message'], 'task': 'get_free_mint_info'}
+        return {'status': 'failed', 'error': 'status_code: ' + str(response.status_code), 'task': 'get_free_mint_info'}
+    except Exception as e:
+        print_red(f'[get_free_mint_info] error: {e}')
+        return {'status': 'failed', 'error': e, 'task': 'get_free_mint_info'}
+
+last_follow_txn = []
+def get_follow_mint_info():
+    global last_follow_txn
+    for addr in FOLLOW_ADDR_LIST:
+        time.sleep(1)
+        if addr.lower() == MY_ADDERESS.lower():
+            continue
+        try:
+            addr = addr.lower()
+            url = f'https://api.etherscan.io/api?module=account&action=txlist&address={addr}&startblock=0&endblock=99999999&page=1&offset=10&sort=desc&apikey={ETHERSCAN_KEY}'
+            r = requests.get(url,verify=False)
+            if r.status_code == 200:
+                if r.json()['status'] == '1':
+                    hash_info = r.json()['result'][0]
+                    if len(last_follow_txn) == 0:
+                        for i in FOLLOW_ADDR_LIST:
+                            last_follow_txn.append({'addr': i.lower(), 'hash':''})
+                    for i in last_follow_txn:
+                        if i['addr'] == addr:
+                            if len(i['hash']) == 0:
+                                i['hash'] = hash_info['hash']
+                                print_green(f'[get_follow_mint_info] follow addr {addr} init success')
+                                break
+                            else:
+                                if i['hash'] == hash_info['hash']:
+                                    break
+                                else:
+                                    i['hash'] = hash_info['hash']
+                                    if hash_info['from'] != addr:
+                                        break
+                                    if hash_info['isError'] == '1':
+                                        break
+                                    # last_follow_txn = hash_info['hash']
+                                    input_data = hash_info['input']
+                                    addr = addr[2:]
+                                    if addr in input_data:
+                                        my_adderss = MY_ADDERESS[2:].lower()
+                                        input_data = input_data.replace(addr, my_adderss)
+                                    return {'status': 'succeed', 'type':'follow','token_address': hash_info['to'],'hash':hash_info['hash'],'input_data':input_data,'value':hash_info['value'],'gas':hash_info['gas'] , 'os_link': 'https://opensea.io/assets/' + hash_info['to'] + '/1', 'task': 'get_follow_mint_info'}
+                    
+                else:
+                    print_red('[get_follow_mint_info] error , message: {}'.format(r.json()['message']))
+                    continue
+            else:
+                print_red(f'[get_follow_mint_info] get api error, status_code:{r.status_code}')
+                continue
+        except Exception as e:
+            print_red(f'[get_follow_mint_info] error: {e} , addr = {addr}')
+            continue
+
+    return {'status': 'failed'}
 
 
-# def mint_by_abi(w3,contract_address,amount,chainId):
-
-#     try:
-#         from_address = Web3.toChecksumAddress(MY_ADDERESS)
-#         contract_address = Web3.toChecksumAddress(contract_address)
-#         nonce = w3.eth.getTransactionCount(from_address) 
-
-#         try:
-#             response = requests.get(f"https://api.etherscan.io/api?module=contract&action=getabi&address={contract_address}&apikey={ETHERSCAN_KEY}")
-#         except Exception as e:
-#             return {'status': 'failed', 'error': e, 'task': '[fetching ABI]'}
-#         abi = response.json()['result']
-#         print_blue(f'[fetch ABI] fetched successfully ,  {contract_address}')
-#         contract = w3.eth.contract(address=contract_address, abi=abi)
-
-#         # json 解析abi
-#         try:
-#             func = ''
-#             contract_abi = json.loads(abi)
-#             for function in contract_abi:
-#                 if function['type'] == 'function':
-#                     if 'mint' == function['name'] and 'uint256' == function['inputs'][0]['type']:
-#                         func = function['name']
-#                         mint = contract.functions.mint(1)
-#                         break
-#                     if 'Mint' == function['name'] and 'uint256' == function['inputs'][0]['type']:
-#                         func = function['name']
-#                         mint = contract.functions.Mint(1)
-#                         break
-#                     if 'freemint' == function['name'] and 'uint256' == function['inputs'][0]['type']:
-#                         func = function['name']
-#                         mint = contract.functions.freemint(1)
-#                         break
-#                     if 'freeMint' == function['name'] and len(function['inputs']) == 0:
-#                         func = function['name']
-#                         mint = contract.functions.freeMint()
-#                         break
-#                     if 'FreeMint' == function['name'] and 'uint256' == function['inputs'][0]['type']:
-#                         func = function['name']
-#                         mint = contract.functions.FreeMint(1)
-#                         break
-#                     if 'mintForAddress' == function['name'] and 'address' == function['inputs'][1]['type']:
-#                         func = function['name']
-#                         mint = contract.functions.mintForAddress(1,from_address)
-#                         break
-#                     if 'mintToAddress' == function['name'] and 'address' == function['inputs'][1]['type']:
-#                         func = function['name']
-#                         mint = contract.functions.mintToAddress(1,from_address)
-#                         break
-#                     if 'mintNft' == function['name'] and 'uint256' == function['inputs'][0]['type']:
-#                         func = function['name']
-#                         mint = contract.functions.mintNft(1)
-#                         break
-#                     if 'mintReserve' == function['name'] and 'address' == function['inputs'][1]['type']:
-#                         func = function['name']
-#                         mint = contract.functions.mintReserve(1,from_address)
-#                         break
-#         except Exception as e:
-#             return {'status': 'failed', 'error': e, 'task': '[parse ABI]'}
-#         if func == '':
-#             return {'status': 'failed', 'error': 'not find mint func', 'task': '[find mint func]'}
-#         print_blue(f'[function] {func}')
-
-#         gas_fee = get_gasprice()
-#         if gas_fee == 0:
-#             return {'status': 'failed', 'error': 'gas price error', 'task': '[get gas price]'}
-#         priorityfee = get_random_float(1,1.5)
-#         print_blue(f'[gas price] {gas_fee} , {priorityfee}')
-
-#         params = {
-#             'from': from_address,
-#             'nonce': nonce,
-#             'value': w3.toWei(amount, 'ether'),
-#             'gas': get_random_int(210000, 250000),
-#             'maxFeePerGas': w3.toWei(gas_fee, 'gwei'),
-#             'maxPriorityFeePerGas': w3.toWei(priorityfee, 'gwei'),
-#             'chainId': chainId,
-#         }
-        
-#         try:
-#             tx = mint.buildTransaction(params)
-#             signed_tx = w3.eth.account.signTransaction(tx, private_key=MY_PRIVATE_KEY)
-#             txn = w3.eth.sendRawTransaction(signed_tx.rawTransaction)
-#             return {'status': 'succeed', 'txn_hash': w3.toHex(txn), 'task': 'mint_nft'}
-#         except Exception as e:
-#             return {'status': 'failed', 'error': e, 'task': 'mint_nft'}
-#     except Exception as e:
-#         return {'status': 'failed', 'error': e, 'task': 'eth_mint_nft'}
 
 def loop_status(txn_hash):
     try:
@@ -337,40 +328,6 @@ def loop_status(txn_hash):
     except Exception as e:
         return {'status': 'unknown', 'error': e, 'task': 'loop_status'}
 
-last_token_addr = ''
-
-def loop_acnft():
-    global last_token_addr
-    url = 'https://www.acnft.xyz/api/nft/freeMintAlert?type=0'
-    while True:
-        try:
-            response = requests.get(url,headers=headers, verify=False)
-            if response.status_code == 200:
-                if response.json()['message'] == 'Api请求成功':
-                    tokens = response.json()['data']['list'][0]
-                    token_address = tokens['token_address']
-                    if last_token_addr == '':
-                        last_token_addr = token_address
-                        print_blue(f'[loop_acnft] init success')
-                    if token_address == last_token_addr:
-                        time.sleep(10)
-                        continue
-                    else:
-                        last_token_addr = token_address
-                        nft_name = tokens['nft_name']
-                        token_img_ico_url = tokens['token_img_ico_url']
-                        os_link = tokens['os_link']
-                        return {'status': 'succeed', 'token_address': token_address, 'nft_name': nft_name, 'token_img_ico_url': token_img_ico_url, 'os_link': os_link, 'task': 'loop_acnft'}
-                else:
-                    print_red('[loop_acnft] error , message: {}'.format(response.json()['message']))
-                    time.sleep(10)
-                    continue
-
-        except Exception as e:
-            print_red(f'[loop_acnft] error: {e}')
-            time.sleep(10)
-            continue
-
 def save_file(status, txn_hash, nft_name, os_link):
     date_str = time.strftime("%Y-%m-%d", time.localtime())
     file = open(f'mint_task_{date_str}.txt', 'a+')
@@ -391,50 +348,96 @@ def name_in_file(nft_name):
 times = 0
 minted_addr = []
 
-def main():
+def main(free_mint,follow_mint):
     global times
+    global minted_addr
     try:
-        acnft_res = loop_acnft()
-        if acnft_res['status'] == 'succeed':
-            target_address = acnft_res['token_address']
-            nft_name = acnft_res['nft_name']
-            # token_img_ico_url = acnft_res['token_img_ico_url']
-            os_link = acnft_res['os_link']
-            times += 1
-            print_green(f'\n\n[main] found new token: {nft_name}, NO {times} to mint')
-            print_green(f'[main] token_address: {target_address}')
-            print_green(f'[main] os_link: {os_link}')
+        while True:
+            try:
+                if free_mint == True:
+                    nft_res = get_free_mint_info()
+                    if nft_res['status'] == 'succeed':
+                        break
+                if follow_mint == True:
+                    nft_res = get_follow_mint_info()
+                    if nft_res['status'] == 'succeed':
+                        break
+                time.sleep(5)
+            except Exception as e:
+                print_red(f'[get nft_res] {e}')
+        times += 1
+
+        print_green(f'\n\n[main] trying to get info ...')
+        target_address = nft_res['token_address']
+        os_link = nft_res['os_link']
+        hash_info = get_info_by_hash(nft_res['hash'])
+        if hash_info['status'] == True:
+            function_name = hash_info['function_name']
+            nft_name = hash_info['nft_name']
+        elif 'not mint' in hash_info['error']:
+            print_red(f'[main] not mint , hash: {hash_info["hash"]}')
+            return
+        else:
+            print_red(f'[main] get_info_by_hash error')
+            return
+        print_green(f'[main] found new nft: {nft_name}, NO {times} to mint , type: {nft_res["type"]}')
+        print_green(f'[main] token_address: {target_address}')
+        print_green(f'[main] os_link: {os_link}')
+        gas_need = int(nft_res['gas'])
+        input_data = nft_res['input_data']
+        if nft_res['type'] == 'free':
+            amount = 0
+        else:
+            amount = int(nft_res['value'])
+            if amount != 0:
+                amount = amount / 10 ** 18
+                if amount > MAX_ETH_FOR_FOLLOW:
+                    print_red(f'[main] amount: {amount} > MAX_ETH_FOR_FOLLOW , skip !!')
+                    return
+        print_green(f'[main] mint function: {function_name} , amount: {amount} , input: {input_data}')
+
+        mint_count = int(hash_info['mint_count'])
+        if mint_count > MAX_MINT_PER_NFT:
+            print_red(f'[main] mint_count: {mint_count} > MAX_MINT_PER_NFT , skip !! hash: {nft_res["hash"]}')
+            return
+
 
         if target_address not in minted_addr:
             minted_addr.append(target_address)
         else:
             print_red(f'[main] already minted, skip')
             return
-        
+        #blacklist check
         for word in blacklist:
             if word in nft_name:
-                print_red(f'[main] blacklist : {word} , skip !!')
+                print_red(f'[main] nft_name : {nft_name} , blacklist : {word} , skip !!')
                 return
-        
+        #minted check
         if name_in_file(nft_name):
             print_red(f'[main] {nft_name} already minted in file , skip !!')
             return
-            
+        #open source check
+        if get_contract_abi(target_address) == False:
+            print_red(f'[main] get_contract_abi failed, probably not open source, skip !!')
+            return
+        #mint function name check
+        fuzz=['wl','admin','dev','og','white','list','owner']
+        for f in fuzz:
+            if f in function_name:
+                print_red(f"[main] mint_name: {function_name} , fuzz: {f} in function_name, skip !!")
+                return
         start_time = time.time()
         w3 = get_w3_by_network()
-        amount = 0
         chainId = 1 # mainnet
-
         balance = w3.eth.get_balance(MY_ADDERESS) / 1e18
         print_blue(f'[balance] {balance}')
-        if balance < 0.003:
+        if balance < amount:
             print_red('[balance] not enough')
-            exit(1)
+            return
 
-        print_blue('[mint] trying mint_by_hash')
-        result = mint_by_hash(w3,target_address,amount,chainId)
+        result = do_mint(w3,chainId,target_address,input_data,gas_need,amount)
         if result['status'] == 'failed':
-            print_red(f'[mint_by_hash] result : {result}')
+            print_red(f'[do_mint] result : {result}')
             if 'replacement transaction underpriced' in str(result['error']):
                 res = cancel_mint(w3, chainId)
                 if res['status'] == 'succeed':
@@ -443,10 +446,15 @@ def main():
                 else:
                     print_red(f'[cancel_mint] {str(res["error"])}')
                     time.sleep(60)
-            
-            print_red(f'[mint] sleep 20s to try again')
-            time.sleep(20)
-            result = mint_by_hash(w3,target_address,amount,chainId)
+            elif 'get gas price error' not in str(result['error']):
+                print_red(f'[mint] unknown error , sleep 60s to try again')
+                time.sleep(60)
+            else:
+                save_file('failed', 'gas_error', nft_name, os_link)
+                print_red(f'[mint] {str(result["error"])}')
+                return
+            result = do_mint(w3,chainId,target_address,input_data,gas_need,amount)
+
 
         try:
             if result['status'] == 'succeed':
@@ -462,21 +470,33 @@ def main():
                 elif receipt['status'] == 'unknown':
                     print_red(f'[mint] unknown , tx : https://etherscan.io/tx/{txn_hash}')
 
-                TG_send_message(f"NO : {times}\n\nnft name : {nft_name}\n\nstatus : {receipt['status']}\n\nhash : https://etherscan.io/tx/{txn_hash}\n\nopensea : {os_link}")
+                TG_send_message(f"NO : {times}\n\ntype : {nft_res['type']}\n\nnft name : {nft_name}\n\nstatus : {receipt['status']}\n\nhash : https://etherscan.io/tx/{txn_hash}\n\nopensea : {os_link}")
                 save_file(receipt['status'], txn_hash, nft_name, os_link)
             else:
-                print_red(f'[mint] failed , {result}')
+                print_red(f'[mint] get mint result failed , {result}')
         except Exception as e:
             print_red(f"[loop status error] {e}")
     except Exception as e:
         print_red(f"[main error] {e}")
 
 
-
+signal_handler = lambda signum, frame: print_green('\n\n[signal_handler] received signal , exit') or sys.exit(0)
 
 if __name__ == "__main__":
-    print_red('[main] start')
+    print_green('[main] start')
+    signal.signal(signal.SIGINT, signal_handler)
+    free_mint = False
+    follow_mint = False
+    input_1 = input('\033[1;36menable free mint? (y/n) >>>\033[0m ')
+    if input_1.lower() == 'y':
+        free_mint = True
+    input_2 = input('\033[1;36menable follow mint? (y/n) >>>\033[0m ')
+    if input_2.lower() == 'y':
+        follow_mint = True
+    if free_mint == False and follow_mint == False:
+        print_red('[main] no mint mode , exit')
+        sys.exit(0)
     while True:
-        main()
+        main(free_mint,follow_mint)
         print_blue(f'[main] time : {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}')
-        time.sleep(3)
+        time.sleep(1)
