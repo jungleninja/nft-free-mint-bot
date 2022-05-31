@@ -14,17 +14,17 @@ pip3 install bs4 lxml web3
 
 # 文件配置
 
-19-24行 更换为自己的key，都是免费申请的
+20-25行 更换为自己的key，都是免费申请的
 
-26行 MAX_GAS_FEE 能接受的最大gas_fee
+27行 MAX_GAS_FEE 能接受的最大gas_fee
 
-27行 MAX_MINT_PER_NFT 最大的可mint数量，超过则跳过（不精准）
+28行 MAX_MINT_PER_NFT 最大的可mint数量，超过则跳过（不精准）
 
-29行 FOLLOW_ADDR_LIST 跟单mint地址，支持多个
+30行 FOLLOW_ADDR_LIST 跟单mint地址，支持多个
 
-30行 MAX_ETH_FOR_FOLLOW 跟单mint时能接受的最大价格（单位：ETH）
+31行 MAX_ETH_FOR_FOLLOW 跟单mint时能接受的最大价格（单位：ETH）
 
-32行 blacklist 黑名单，当nft_name中包含这些字符则跳过
+33行 blacklist 黑名单，当nft_name中包含这些字符则跳过
 
 # 功能
 
