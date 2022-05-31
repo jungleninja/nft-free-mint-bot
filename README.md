@@ -40,7 +40,7 @@ pip3 install bs4 lxml web3
 
 2022.5.31 更新
 
-6. 增加跟单mint模式
+6. 增加跟单mint模式 支持多个地址
 
 # 运行
 
