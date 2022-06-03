@@ -51,4 +51,4 @@ pip3 install bs4 lxml web3
 # 其他
 
 discord Xinja#8947    
-Yu DAO 社区 [discord](https://discord.gg/zgCCJjZv "discord") 欢迎大家加入一起交流
+Yu DAO 社区 [discord](https://discord.gg/bGqPbP8JTM "discord") 欢迎大家加入一起交流
