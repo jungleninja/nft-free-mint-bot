@@ -423,7 +423,7 @@ def main(free_mint,follow_mint):
         #mint function name check
         fuzz=['wl','admin','dev','og','white','list','owner']
         for f in fuzz:
-            if f in function_name:
+            if f in function_name.lower():
                 print_red(f"[main] mint_name: {function_name} , fuzz: {f} in function_name, skip !!")
                 return
         start_time = time.time()
