@@ -103,7 +103,7 @@ def get_info_by_hash(hash):
                 function_name = re.findall(r"Function: (.*?)\(", text.text)
                 if function_name:
                     function_name = function_name[0]
-                    nft_name = soup.find('span', class_='hash-tag text-truncate mr-1').text
+                    nft_name = soup.find('span', class_='hash-tag text-truncate mr-1')["title"]
                     return {"status":True, "mint_count":mint_count, "function_name":function_name, "nft_name":nft_name}
                 else:
                     print_red(f"[get_info_by_hash] error: function_name not found , probably not open source , hash: {hash}")
