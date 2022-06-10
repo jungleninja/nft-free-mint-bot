@@ -1,7 +1,7 @@
 from ast import arg
 from datetime import date
 import errno
-from multiprocessing.connection import wait
+from multiprocessing import Process
 import os
 from pickle import TRUE
 from queue import PriorityQueue
@@ -255,7 +255,8 @@ last_follow_txn = []
 def get_follow_mint_info():
     global last_follow_txn
     for addr in FOLLOW_ADDR_LIST:
-        time.sleep(1)
+        # Limitation of the free Ethereum api.
+        time.sleep(5)
         if addr.lower() == MY_ADDERESS.lower():
             continue
         try:
@@ -348,139 +349,144 @@ def name_in_file(nft_name):
 times = 0
 minted_addr = []
 
-def main(free_mint,follow_mint):
+def main(is_free):
     global times
     global minted_addr
-    try:
-        while True:
-            try:
-                if free_mint == True:
-                    nft_res = get_free_mint_info()
-                    if nft_res['status'] == 'succeed':
-                        break
-                if follow_mint == True:
-                    nft_res = get_follow_mint_info()
-                    if nft_res['status'] == 'succeed':
-                        break
-                time.sleep(5)
-            except Exception as e:
-                print_red(f'[get nft_res] {e}')
-        times += 1
-
-        print_green(f'\n\n[main] trying to get info ...')
-        target_address = nft_res['token_address']
-        os_link = nft_res['os_link']
-        hash_info = get_info_by_hash(nft_res['hash'])
-        if hash_info['status'] == True:
-            function_name = hash_info['function_name']
-            nft_name = hash_info['nft_name']
-        elif 'not mint' in hash_info['error']:
-            print_red(f'[main] not mint , hash: {hash_info["hash"]}')
-            return
-        else:
-            print_red(f'[main] get_info_by_hash error')
-            return
-        print_green(f'[main] found new nft: {nft_name}, NO {times} to mint , type: {nft_res["type"]}')
-        print_green(f'[main] token_address: {target_address}')
-        print_green(f'[main] os_link: {os_link}')
-        gas_need = int(nft_res['gas'])
-        input_data = nft_res['input_data']
-        if nft_res['type'] == 'free':
-            amount = 0
-        else:
-            amount = int(nft_res['value'])
-            if amount != 0:
-                amount = amount / 10 ** 18
-                if amount > MAX_ETH_FOR_FOLLOW:
-                    print_red(f'[main] amount: {amount} > MAX_ETH_FOR_FOLLOW , skip !!')
-                    return
-        print_green(f'[main] mint function: {function_name} , amount: {amount} , input: {input_data}')
-
-        mint_count = int(hash_info['mint_count'])
-        if mint_count > MAX_MINT_PER_NFT:
-            print_red(f'[main] mint_count: {mint_count} > MAX_MINT_PER_NFT , skip !! hash: {nft_res["hash"]}')
-            return
-
-
-        if target_address not in minted_addr:
-            minted_addr.append(target_address)
-        else:
-            print_red(f'[main] already minted, skip')
-            return
-        #blacklist check
-        for word in blacklist:
-            if word in nft_name:
-                print_red(f'[main] nft_name : {nft_name} , blacklist : {word} , skip !!')
-                return
-        #minted check
-        if name_in_file(nft_name):
-            print_red(f'[main] {nft_name} already minted in file , skip !!')
-            return
-        #open source check
-        if get_contract_abi(target_address) == False:
-            print_red(f'[main] get_contract_abi failed, probably not open source, skip !!')
-            return
-        #mint function name check
-        fuzz=['wl','admin','dev','og','white','list','owner']
-        for f in fuzz:
-            if f in function_name.lower():
-                print_red(f"[main] mint_name: {function_name} , fuzz: {f} in function_name, skip !!")
-                return
-        start_time = time.time()
-        w3 = get_w3_by_network()
-        chainId = 1 # mainnet
-        balance = w3.eth.get_balance(MY_ADDERESS) / 1e18
-        print_blue(f'[balance] {balance}')
-        if balance < amount:
-            print_red('[balance] not enough')
-            return
-
-        result = do_mint(w3,chainId,target_address,input_data,gas_need,amount)
-        if result['status'] == 'failed':
-            print_red(f'[do_mint] result : {result}')
-            if 'replacement transaction underpriced' in str(result['error']):
-                res = cancel_mint(w3, chainId)
-                if res['status'] == 'succeed':
-                    print_red(f'[cancel_mint] {res["txn_hash"]} , sleep 1 min')
-                    time.sleep(60)
-                else:
-                    print_red(f'[cancel_mint] {str(res["error"])}')
-                    time.sleep(60)
-            elif 'get gas price error' not in str(result['error']):
-                print_red(f'[mint] unknown error , sleep 60s to try again')
-                time.sleep(60)
-            else:
-                save_file('failed', 'gas_error', nft_name, os_link)
-                print_red(f'[mint] {str(result["error"])}')
-                return
-            result = do_mint(w3,chainId,target_address,input_data,gas_need,amount)
-
-
+    while True:
         try:
-            if result['status'] == 'succeed':
-                end_time = time.time()
-                txn_hash = result['txn_hash']
-                print_blue(f'[mint] mint resquest succeed, txn_hash: {txn_hash} ')
-                print_blue(f'[mint] took {round(end_time - start_time)} seconds , loop 5 minutes to confirm')
-                receipt = loop_status(txn_hash)
-                if receipt['status'] == 'succeed':
-                    print_green(f'[mint] succeed , tx : https://etherscan.io/tx/{txn_hash}')
-                elif receipt['status'] == 'failed':
-                    print_red(f'[mint] failed , tx : https://etherscan.io/tx/{txn_hash}')
-                elif receipt['status'] == 'unknown':
-                    print_red(f'[mint] unknown , tx : https://etherscan.io/tx/{txn_hash}')
-
-                TG_send_message(f"NO : {times}\n\ntype : {nft_res['type']}\n\nnft name : {nft_name}\n\nstatus : {receipt['status']}\n\nhash : https://etherscan.io/tx/{txn_hash}\n\nopensea : {os_link}")
-                save_file(receipt['status'], txn_hash, nft_name, os_link)
+            if is_free:
+                nft_res = get_free_mint_info()
             else:
-                print_red(f'[mint] get mint result failed , {result}')
+                nft_res = get_follow_mint_info()
+            if nft_res['status'] == 'succeed':
+                break
         except Exception as e:
-            print_red(f"[loop status error] {e}")
+            print_red(f'[get nft_res] {e}')
+    times += 1
+    try:
+        parse_res(nft_res, times)
     except Exception as e:
         print_red(f"[main error] {e}")
 
+def parse_res(nft_res, times):
+    print_green(f'\n\n[main] trying to get info ...')
+    target_address = nft_res['token_address']
+    os_link = nft_res['os_link']
+    hash_info = get_info_by_hash(nft_res['hash'])
+    if hash_info['status'] == True:
+        function_name = hash_info['function_name']
+        nft_name = hash_info['nft_name']
+    elif 'not mint' in hash_info['error']:
+        print_red(f'[main] not mint , hash: {hash_info["hash"]}')
+        return
+    else:
+        print_red(f'[main] get_info_by_hash error')
+        return
+    print_green(f'[main] found new nft: {nft_name}, NO {times} to mint , type: {nft_res["type"]}')
+    print_green(f'[main] token_address: {target_address}')
+    print_green(f'[main] os_link: {os_link}')
+    gas_need = int(nft_res['gas'])
+    input_data = nft_res['input_data']
+    if nft_res['type'] == 'free':
+        amount = 0
+    else:
+        amount = int(nft_res['value'])
+        if amount != 0:
+            amount = amount / 10 ** 18
+            if amount > MAX_ETH_FOR_FOLLOW:
+                print_red(f'[main] amount: {amount} > MAX_ETH_FOR_FOLLOW , skip !!')
+                return
+    print_green(f'[main] mint function: {function_name} , amount: {amount} , input: {input_data}')
+
+    mint_count = int(hash_info['mint_count'])
+    if mint_count > MAX_MINT_PER_NFT:
+        print_red(f'[main] mint_count: {mint_count} > MAX_MINT_PER_NFT , skip !! hash: {nft_res["hash"]}')
+        return
+
+
+    if target_address not in minted_addr:
+        minted_addr.append(target_address)
+    else:
+        print_red(f'[main] already minted, skip')
+        return
+    #blacklist check
+    for word in blacklist:
+        if word in nft_name:
+            print_red(f'[main] nft_name : {nft_name} , blacklist : {word} , skip !!')
+            return
+    #minted check
+    if name_in_file(nft_name):
+        print_red(f'[main] {nft_name} already minted in file , skip !!')
+        return
+    #open source check
+    if get_contract_abi(target_address) == False:
+        print_red(f'[main] get_contract_abi failed, probably not open source, skip !!')
+        return
+    #mint function name check
+    fuzz=['wl','admin','dev','og','white','list','owner']
+    for f in fuzz:
+        if f in function_name.lower():
+            print_red(f"[main] mint_name: {function_name} , fuzz: {f} in function_name, skip !!")
+            return
+    start_time = time.time()
+    w3 = get_w3_by_network()
+    chainId = 1 # mainnet
+    balance = w3.eth.get_balance(MY_ADDERESS) / 1e18
+    print_blue(f'[balance] {balance}')
+    if balance < amount:
+        print_red('[balance] not enough')
+        return
+
+    result = do_mint(w3,chainId,target_address,input_data,gas_need,amount)
+    if result['status'] == 'failed':
+        print_red(f'[do_mint] result : {result}')
+        if 'replacement transaction underpriced' in str(result['error']):
+            res = cancel_mint(w3, chainId)
+            if res['status'] == 'succeed':
+                print_red(f'[cancel_mint] {res["txn_hash"]} , sleep 1 min')
+                time.sleep(60)
+            else:
+                print_red(f'[cancel_mint] {str(res["error"])}')
+                time.sleep(60)
+        elif 'get gas price error' not in str(result['error']):
+            print_red(f'[mint] unknown error , sleep 60s to try again')
+            time.sleep(60)
+        else:
+            save_file('failed', 'gas_error', nft_name, os_link)
+            print_red(f'[mint] {str(result["error"])}')
+            return
+        result = do_mint(w3,chainId,target_address,input_data,gas_need,amount)
+
+
+    try:
+        if result['status'] == 'succeed':
+            end_time = time.time()
+            txn_hash = result['txn_hash']
+            print_blue(f'[mint] mint resquest succeed, txn_hash: {txn_hash} ')
+            print_blue(f'[mint] took {round(end_time - start_time)} seconds , loop 5 minutes to confirm')
+            receipt = loop_status(txn_hash)
+            if receipt['status'] == 'succeed':
+                print_green(f'[mint] succeed , tx : https://etherscan.io/tx/{txn_hash}')
+            elif receipt['status'] == 'failed':
+                print_red(f'[mint] failed , tx : https://etherscan.io/tx/{txn_hash}')
+            elif receipt['status'] == 'unknown':
+                print_red(f'[mint] unknown , tx : https://etherscan.io/tx/{txn_hash}')
+
+            TG_send_message(f"NO : {times}\n\ntype : {nft_res['type']}\n\nnft name : {nft_name}\n\nstatus : {receipt['status']}\n\nhash : https://etherscan.io/tx/{txn_hash}\n\nopensea : {os_link}")
+            save_file(receipt['status'], txn_hash, nft_name, os_link)
+        else:
+            print_red(f'[mint] get mint result failed , {result}')
+    except Exception as e:
+        print_red(f"[loop status error] {e}")
+
 
 signal_handler = lambda signum, frame: print_green('\n\n[signal_handler] received signal , exit') or sys.exit(0)
+
+def main_process(is_free):
+    while True:
+        main(is_free)
+    print_blue(f'[main] time : {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}')
+    time.sleep(1)
 
 if __name__ == "__main__":
     print_green('[main] start')
@@ -496,7 +502,12 @@ if __name__ == "__main__":
     if free_mint == False and follow_mint == False:
         print_red('[main] no mint mode , exit')
         sys.exit(0)
-    while True:
-        main(free_mint,follow_mint)
-        print_blue(f'[main] time : {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}')
-        time.sleep(1)
+    elif free_mint != follow_mint:
+        main_process(free_mint)
+    else:
+        processes = [Process(target=main_process, args=(True,)),Process(target=main_process, args=(False,))]
+        [p.start() for p in processes]
+        # Mint times. Please update the number to whatever you want.
+        if times == 100:
+            [p.join() for p in processes]
+
